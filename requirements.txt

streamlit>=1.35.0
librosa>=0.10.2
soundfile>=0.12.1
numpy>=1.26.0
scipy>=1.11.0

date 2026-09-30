@@ -1,0 +1,180 @@
+import io
+import math
+import os
+from pathlib import Path
+
+import librosa
+import numpy as np
+import soundfile as sf
+import streamlit as st
+from scipy.signal import butter, filtfilt
+
+
+st.set_page_config(page_title="مولد الموسيقى الذكي", page_icon="🎵", layout="wide")
+
+
+@st.cache_data
+def load_audio_bytes(file_bytes: bytes):
+    return file_bytes
+
+
+def apply_brightness(signal: np.ndarray, sr: int, intensity: float) -> np.ndarray:
+    """تعديل السطوع الصوتي: زيادة/تقليل الترددات العالية."""
+    if intensity == 0:
+        return signal
+    cutoff = 1500 + (1 - intensity) * 5500
+    b, a = butter(4, cutoff / (sr / 2), btype="low")
+    filtered = filtfilt(b, a, signal)
+    return signal * (1 - abs(intensity) * 0.35) + filtered * (abs(intensity) * 0.35)
+
+
+def apply_reverb(signal: np.ndarray, sr: int, wet: float) -> np.ndarray:
+    """مؤثرات صدى بسيطة."""
+    if wet <= 0:
+        return signal
+
+    delayed = np.zeros_like(signal, dtype=np.float32)
+    delays = [0.035, 0.055, 0.09, 0.13]
+    gains = [0.35, 0.25, 0.18, 0.12]
+
+    for d, g in zip(delays, gains):
+        delay_samples = max(1, int(sr * d))
+        if delay_samples >= len(signal):
+            continue
+        delayed[delay_samples:] += signal[:-delay_samples] * g
+
+    return signal * (1 - wet) + delayed * wet
+
+
+def apply_chorus(signal: np.ndarray, sr: int, depth: float, rate: float) -> np.ndarray:
+    """تأثير كوروس بسيط يشبه الخفقان الدائري."""
+    if depth <= 0:
+        return signal
+
+    length = len(signal)
+    out = signal.copy().astype(np.float32)
+    mod_rate = rate
+    mod_depth = int(sr * (0.005 + depth * 0.02))
+    t = np.arange(length, dtype=np.float32)
+    modulation = np.sin(2 * np.pi * mod_rate * t / sr)
+    delay_line = np.zeros(length, dtype=np.float32)
+
+    for i in range(length):
+        shift = int(mod_depth * modulation[i])
+        source_index = i - shift
+        if 0 <= source_index < length:
+            delay_line[i] = signal[source_index]
+
+    return signal * (1 - depth * 0.55) + delay_line * (depth * 0.55)
+
+
+def process_channel(channel: np.ndarray, sr: int, tempo: float, pitch: float, reverb: float, brightness: float, chorus_depth: float, chorus_rate: float) -> np.ndarray:
+    c = channel.astype(np.float32)
+    c = librosa.effects.time_stretch(c, rate=tempo)
+    c = librosa.effects.pitch_shift(c, sr=sr, n_steps=pitch)
+    c = apply_brightness(c, sr, brightness)
+    c = apply_chorus(c, sr, chorus_depth, chorus_rate)
+    c = apply_reverb(c, sr, reverb)
+    c = np.clip(c, -1.0, 1.0)
+    return c
+
+
+def process_audio(audio, sr: int, tempo: float, pitch: float, reverb: float, brightness: float, chorus_depth: float, chorus_rate: float):
+    if audio.ndim == 1:
+        return process_channel(audio, sr, tempo, pitch, reverb, brightness, chorus_depth, chorus_rate)
+
+    processed = []
+    for ch in range(audio.shape[1]):
+        processed.append(
+            process_channel(audio[:, ch], sr, tempo, pitch, reverb, brightness, chorus_depth, chorus_rate)
+        )
+    return np.stack(processed, axis=1)
+
+
+def generate_variant(audio, sr: int, prompt: str, tempo: float, pitch: float, reverb: float, brightness: float, chorus_depth: float, chorus_rate: float):
+    # هذا نموذج تجريبي يضيف اختلافاً طفيفاً على الملف الأصلي ليشبه النسخة "المماثلة".
+    processed = process_audio(audio, sr, tempo, pitch, reverb, brightness, chorus_depth, chorus_rate)
+    return processed
+
+
+st.title("🎵 مولد الموسيقى الذكي")
+st.caption("نسخة تجريبية تشبه سونو، تعمل على تعديل ملف صوتي وتوليد نسخة مماثلة مع اختلافات خفيفة.")
+
+with st.sidebar:
+    st.header("إعدادات التوليد")
+    tempo = st.slider("سرعة التشغيل", 0.8, 1.25, 1.05, 0.01)
+    pitch = st.slider("رفع/خفض النغمة", -3.0, 3.0, 1.0, 0.5)
+    reverb = st.slider("التأثير الصدائي", 0.0, 0.6, 0.18, 0.01)
+    brightness = st.slider("سطوع الصوت", 0.0, 1.0, 0.7, 0.01)
+    chorus_depth = st.slider("قوة التأثير الصوتي", 0.0, 1.0, 0.35, 0.01)
+    chorus_rate = st.slider("سرعة الومضات الصوتية", 0.5, 3.0, 1.6, 0.1)
+    st.markdown("---")
+    st.info("ملاحظة: هذا مشروع تجريبي يطبق معالجة صوتية وليس نموذج ذكاء اصطناعي كامل للتوليد الموسيقي من النص.")
+
+prompt = st.text_area("وصف الموسيقى أو الفكرة", value="تأثير عربي دافئ، ناعم، ينساب مع إيقاع لطيف وكلمات ساحرة.", height=120)
+
+uploaded_file = st.file_uploader("اختر ملف صوتي (mp3, wav, ogg)", type=["wav", "mp3", "ogg", "flac"])
+
+if uploaded_file is not None:
+    with st.spinner("جاري معالجة الملف الصوتي وإنتاج نسخة مشابهة..."):
+        file_bytes = uploaded_file.read()
+        file_name = uploaded_file.name
+        try:
+            audio, sr = sf.read(io.BytesIO(file_bytes), always_2d=False)
+        except Exception:
+            audio, sr = librosa.load(io.BytesIO(file_bytes), sr=None, mono=False)
+
+        if isinstance(audio, np.ndarray) and audio.ndim == 2:
+            audio = np.asarray(audio, dtype=np.float32)
+        else:
+            audio = np.asarray(audio, dtype=np.float32)
+
+        if audio.ndim == 0:
+            st.error("الملف الصوتي غير صالح. حاول ملفاً صوتياً آخر.")
+            st.stop()
+
+        if audio.ndim == 1:
+            processed = generate_variant(audio, sr, prompt, tempo, pitch, reverb, brightness, chorus_depth, chorus_rate)
+        else:
+            processed = generate_variant(audio, sr, prompt, tempo, pitch, reverb, brightness, chorus_depth, chorus_rate)
+
+        output_buffer = io.BytesIO()
+        sf.write(output_buffer, processed, sr, format="WAV")
+        output_buffer.seek(0)
+
+        st.success("ت�� توليد نسخة موسيقية جديدة بنجاح.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("النسخة الأصلية")
+            st.audio(file_bytes, format="audio/wav")
+        with col2:
+            st.subheader("النسخة المولدة")
+            st.audio(output_buffer.getvalue(), format="audio/wav")
+
+        st.download_button(
+            label="تحميل النسخة المولدة",
+            data=output_buffer.getvalue(),
+            file_name=f"generated_{Path(file_name).stem}.wav",
+            mime="audio/wav",
+        )
+
+        st.markdown("---")
+        st.subheader("تفاصيل المعالجة")
+        st.write({
+            "اسم الملف": file_name,
+            "معدل العينة": sr,
+            "سرعة التشغيل": tempo,
+            "رفع النغمة": pitch,
+            "التأثير الصدائي": reverb,
+            "سطوع الصوت": brightness,
+            "قوة التأثير الصوتي": chorus_depth,
+            "سرعة الومضات الصوتية": chorus_rate,
+            "وصف الموسيقى": prompt,
+        })
+else:
+    st.info("قم بتحميل ملف صوتي من الجهاز لبدء التوليد.")
+
+
+if __name__ == "__main__":
+    pass
